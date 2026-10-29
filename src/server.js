@@ -1,0 +1,121 @@
+const http = require('http');
+const path = require('path');
+const express = require('express');
+const { Server } = require('socket.io');
+const { getLocalIPv4Addresses } = require('./utils/network');
+const { sessionService } = require('./services/sessionService');
+const sessionRoutes = require('./routes/sessionRoutes');
+
+const { initSocketHandlers } = require('./sockets/socketHandler');
+
+const app = express();
+
+// Express JSON body parser for incoming API payloads
+app.use(express.json());
+
+// Create HTTP server wrapping Express app
+const server = http.createServer(app);
+
+// Socket.IO is attached directly to the existing HTTP server instance so that both
+// standard HTTP page requests and real-time WebSocket connections share the same
+// single TCP port (default 3000). This avoids opening extra ports or relying on internet services.
+const io = new Server(server, {
+  cors: {
+    origin: '*',
+    methods: ['GET', 'POST']
+  }
+});
+app.set('io', io);
+
+// Initialize modular socket event listeners and connection safety handlers (Task 7.1)
+initSocketHandlers(io);
+
+const PORT = Number(process.env.PORT) || 3000;
+const HOST = '0.0.0.0';
+
+// Resolve public folder using __dirname for reliable path resolution
+const publicDir = path.join(__dirname, '../public');
+
+// Health-check endpoint for server status confirmation (Task 2.5)
+app.get('/health', (req, res) => {
+  res.status(200).json({ status: 'ok', service: 'offline-qa' });
+});
+
+// Session and Room Validation API routes (Task 4.4)
+app.use('/api/sessions', sessionRoutes);
+
+// Dedicated page routes
+app.get(['/', '/student', '/student/'], (req, res) => {
+  res.sendFile(path.join(publicDir, 'student', 'index.html'));
+});
+
+app.get(['/moderator', '/moderator/'], (req, res) => {
+  res.sendFile(path.join(publicDir, 'moderator', 'index.html'));
+});
+
+app.get(['/display', '/display/'], (req, res) => {
+  res.sendFile(path.join(publicDir, 'display', 'index.html'));
+});
+
+// Serve static assets (CSS, JS, assets) safely from public directory
+app.use(express.static(publicDir));
+
+// 404 Not Found handler for unknown routes (Task 2.7)
+app.use((req, res) => {
+  res.status(404).json({
+    error: 'Not Found',
+    message: `The requested endpoint '${req.originalUrl}' was not found on this server.`
+  });
+});
+
+// Centralized 500 Internal Server Error middleware (Task 2.7)
+// Log diagnostics on server side without exposing internal stack traces or secrets to client
+// eslint-disable-next-line no-unused-vars
+app.use((err, req, res, next) => {
+  console.error(`[Server Error] ${req.method} ${req.url}:`, err.stack || err);
+  res.status(500).json({
+    error: 'Internal Server Error',
+    message: 'An unexpected server error occurred.'
+  });
+});
+
+// Start HTTP server listening on 0.0.0.0
+server.listen(PORT, HOST, () => {
+  const ipAddresses = getLocalIPv4Addresses();
+  const defaultSession = sessionService.getOrCreateDefaultSession();
+
+  console.log(`=======================================================`);
+  console.log(` Offline Anonymous Q&A Server Running`);
+  console.log(` Host: ${HOST} (Binds to all local network interfaces)`);
+  console.log(` Port: ${PORT}`);
+  console.log(` Active Presentation Room Code: ${defaultSession.roomCode}`);
+  console.log(` Presenter Secret Token       : ${defaultSession.presenterSecret}`);
+  console.log(` Note: 0.0.0.0 allows devices on your local Wi-Fi to connect.`);
+  console.log(` (Do not type 0.0.0.0 in student browsers)`);
+  console.log(`-------------------------------------------------------`);
+  console.log(` Presenter Local Access:`);
+  console.log(`   Student Page    : http://localhost:${PORT}/student`);
+  console.log(`   Moderator Page  : http://localhost:${PORT}/moderator`);
+  console.log(`   Projector Page  : http://localhost:${PORT}/display`);
+  console.log(`   Health Check    : http://localhost:${PORT}/health`);
+  console.log(`-------------------------------------------------------`);
+  console.log(` Student Wi-Fi / Hotspot Access (use laptop LAN IPv4):`);
+
+  if (ipAddresses.length > 0) {
+    ipAddresses.forEach((item) => {
+      console.log(`   [${item.interfaceName}] http://${item.address}:${PORT}/student`);
+    });
+  } else {
+    console.log(`   No active non-internal IPv4 interface detected.`);
+    console.log(`   Run 'ipconfig' (Windows) or 'ifconfig' (Mac/Linux) to find LAN IP.`);
+  }
+
+  console.log(`=======================================================`);
+});
+
+server.on('error', (err) => {
+  console.error('Server startup error:', err);
+  process.exit(1);
+});
+
+module.exports = { app, server, io };
